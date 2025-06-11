@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import time
 import rospy
 from duckietown.dtros import DTROS, NodeType
 from sensor_msgs.msg import CompressedImage
@@ -10,6 +11,7 @@ from cv_bridge import CvBridge
 from std_msgs.msg import Float64
 from collections import deque
 from image_processor import ImageProcessor
+from config import AprilTagConfig
 
 BASE_SPEED = 0.25
 CURVE_SPEED = 0.20
@@ -37,6 +39,11 @@ class CameraReaderNode(DTROS):
         
         self.image_processor = ImageProcessor()
         
+        self.stop_sign_detected = False
+        self.stop_start_time = None
+        self.is_stopping = False
+        self.last_stop_time = None
+        
         self._vehicle_name = os.environ['VEHICLE_NAME']
         self._camera_topic = f"/{self._vehicle_name}/camera_node/image/compressed"
         wheels_topic = f"/{self._vehicle_name}/wheels_driver_node/wheels_cmd"
@@ -53,6 +60,14 @@ class CameraReaderNode(DTROS):
         self.right_motor = rospy.Publisher("right_motor", Float64, queue_size=1)
 
         self.shutting_down = False
+        # Create trackbars for white color adjustment
+        cv2.createTrackbar('Lower Hue', self._window, 21, 180, lambda x: None)
+        cv2.createTrackbar('Upper Hue', self._window, 180, 180, lambda x: None)
+        cv2.createTrackbar('Lower Saturation', self._window, 0, 255, lambda x: None)
+        cv2.createTrackbar('Upper Saturation', self._window, 67, 255, lambda x: None)
+        cv2.createTrackbar('Lower Value', self._window, 164, 255, lambda x: None)
+        cv2.createTrackbar('Upper Value', self._window, 232, 255, lambda x: None)
+
         rospy.on_shutdown(self.shutdown_hook)
 
     def shutdown_hook(self):
@@ -76,20 +91,66 @@ class CameraReaderNode(DTROS):
         
         red_light_detected = self.image_processor.detect_red_light(self.image)
         
+        try:
+            apriltag_detections = self.image_processor.detect_apriltags(self.image)
+            self.image_processor.add_apriltag_visualization(vis_image, apriltag_detections)
+            
+            stop_sign_found, tag_size = self.image_processor.check_stop_sign(apriltag_detections)
+            
+            current_time = time.time()
+            can_stop = True
+            
+            if self.last_stop_time is not None:
+                time_since_last_stop = current_time - self.last_stop_time
+                can_stop = time_since_last_stop >= AprilTagConfig.STOP_COOLDOWN
+            
+            if stop_sign_found and not self.is_stopping and can_stop:
+                print(f"Stop sign detected! Tag ID: {AprilTagConfig.STOP_SIGN_ID}, Size: {tag_size:.1f}")
+                self.stop_sign_detected = True
+                self.stop_start_time = current_time
+                self.is_stopping = True
+            elif stop_sign_found and not can_stop:
+                time_remaining = AprilTagConfig.STOP_COOLDOWN - (current_time - self.last_stop_time)
+                print(f"Stop sign visible but in cooldown. {time_remaining:.1f}s remaining")
+            
+            if self.is_stopping:
+                elapsed_time = current_time - self.stop_start_time
+                if elapsed_time >= AprilTagConfig.STOP_DURATION:
+                    print(f"Stop duration complete ({AprilTagConfig.STOP_DURATION}s). Resuming movement.")
+                    self.is_stopping = False
+                    self.stop_sign_detected = False
+                    self.last_stop_time = current_time
+                    self.stop_start_time = None
+                else:
+                    print(f"Stopping... {elapsed_time:.1f}/{AprilTagConfig.STOP_DURATION}s")
+                    
+        except Exception as e:
+            print(f"AprilTag processing error: {e}")
+            apriltag_detections = []
+        
         h, w = self.image.shape[:2]
         near_field = self.image[int(h*0.6):, :]
         far_field = self.image[int(h*0.4):int(h*0.6), :]
         
-        luv = cv2.cvtColor(self.image, cv2.COLOR_BGR2LUV)
-        hls = cv2.cvtColor(self.image, cv2.COLOR_BGR2HLS)
+        luv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
+        hls = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
 
-        lb_yellow = np.array([10, 85, 160])
-        ub_yellow = np.array([255, 255, 255])
+        lb_yellow = np.array([15, 80, 150])
+        ub_yellow = np.array([35, 255, 255])
         mask_yellow = cv2.inRange(luv, lb_yellow, ub_yellow)
         mask_yellow[:int(h*0.55), :] = 0
         
-        lb_white = np.array([0, 144, 0])
-        ub_white = np.array([168, 255, 36])
+        
+        lower_hue = cv2.getTrackbarPos('Lower Hue', self._window)
+        upper_hue = cv2.getTrackbarPos('Upper Hue', self._window)
+        lower_saturation = cv2.getTrackbarPos('Lower Saturation', self._window)
+        upper_saturation = cv2.getTrackbarPos('Upper Saturation', self._window)
+        lower_value = cv2.getTrackbarPos('Lower Value', self._window)
+        upper_value = cv2.getTrackbarPos('Upper Value', self._window)
+
+
+        lb_white = np.array([lower_hue, lower_saturation, lower_value])
+        ub_white = np.array([upper_hue, upper_saturation, upper_value])
         mask_white = cv2.inRange(hls, lb_white, ub_white)
         mask_white[:int(h*0.55), :] = 0
         
@@ -193,7 +254,10 @@ class CameraReaderNode(DTROS):
         left_motor = np.clip(left_motor, -1.0, 1.0)
         right_motor = np.clip(right_motor, -1.0, 1.0)
         
-        if red_light_detected:
+        if self.is_stopping:
+            left_motor = 0.0
+            right_motor = 0.0
+        elif red_light_detected:
             left_motor = 0.0
             right_motor = 0.0
         
@@ -201,10 +265,18 @@ class CameraReaderNode(DTROS):
             self.left_motor.publish(left_motor)
             self.right_motor.publish(right_motor)
 
-        self.image_processor.add_visualization_info(vis_image, is_curve, curve_direction, 
-                                                   error, steering, red_light_detected)
+        stop_cooldown_remaining = None
+        if self.last_stop_time is not None:
+            time_since_last_stop = time.time() - self.last_stop_time
+            if time_since_last_stop < AprilTagConfig.STOP_COOLDOWN:
+                stop_cooldown_remaining = AprilTagConfig.STOP_COOLDOWN - time_since_last_stop
         
-        cv2.imshow(self._window, vis_image)
+        self.image_processor.add_visualization_info(vis_image, is_curve, curve_direction, 
+                                                   error, steering, red_light_detected, 
+                                                   len(apriltag_detections) if apriltag_detections else 0,
+                                                   self.is_stopping, stop_cooldown_remaining)
+        
+        cv2.imshow(self._window, contour_img)
         cv2.waitKey(1)
 
 

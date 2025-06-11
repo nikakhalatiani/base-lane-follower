@@ -2,13 +2,117 @@
 
 import cv2
 import numpy as np
-from config import VisionConfig, TrafficLightConfig
+from config import VisionConfig, TrafficLightConfig, AprilTagConfig
 
 class ImageProcessor:
     
     def __init__(self):
         self.kernel = np.ones(VisionConfig.KERNEL_SIZE, np.uint8)
         self.red_light_history = []
+        try:
+            from pupil_apriltags import Detector
+            self.apriltag_detector = Detector(
+                families='tag36h11',
+                nthreads=1,
+                quad_decimate=1.0,
+                quad_sigma=0.0,
+                refine_edges=1,
+                decode_sharpening=0.25,
+                debug=0
+            )
+            self.apriltag_available = True
+            self.apriltag_library = 'pupil'
+            print("AprilTag detector (pupil-apriltags) initialized with tag36h11 family")
+        except (ImportError, ModuleNotFoundError):
+            try:
+                import apriltag
+                self.apriltag_detector = apriltag.Detector()
+                self.apriltag_available = True
+                self.apriltag_library = 'standard'
+                print("AprilTag detector (standard apriltag) initialized")
+            except (ImportError, TypeError):
+                self.apriltag_available = False
+                self.apriltag_library = None
+                print("AprilTag library not available. System will work without AprilTag detection.")
+    
+    def calculate_tag_size(self, corners):
+        try:
+            corners = np.array(corners, dtype=np.float32)
+            if corners.shape[0] < 3:
+                return 0
+            corners = corners.reshape((-1, 1, 2))
+            perimeter = cv2.arcLength(corners, True)
+            return perimeter
+        except Exception as e:
+            print(f"Error calculating tag size: {e}")
+            return 0
+    
+    def check_stop_sign(self, detections):
+        for detection in detections:
+            if detection['id'] == AprilTagConfig.STOP_SIGN_ID:
+                tag_size = self.calculate_tag_size(detection['corners'])
+                if tag_size >= AprilTagConfig.MIN_TAG_SIZE:
+                    return True, tag_size
+        return False, 0
+    
+    def detect_apriltags(self, image):
+        if not self.apriltag_available:
+            return []
+        
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        try:
+            detections = self.apriltag_detector.detect(gray)
+            
+            results = []
+            for detection in detections:
+                try:
+                    if self.apriltag_library == 'pupil':
+                        tag_info = {
+                            'id': detection.tag_id,
+                            'family': getattr(detection, 'tag_family', 'tag36h11'),
+                            'center': detection.center,
+                            'corners': detection.corners,
+                            'hamming': getattr(detection, 'hamming', 0),
+                            'goodness': getattr(detection, 'decision_margin', 0.0)
+                        }
+                    else:
+                        tag_info = {
+                            'id': detection.tag_id,
+                            'family': getattr(detection, 'tag_family', 'tag36h11'),
+                            'center': detection.center,
+                            'corners': detection.corners,
+                            'hamming': getattr(detection, 'hamming', 0),
+                            'goodness': getattr(detection, 'goodness', 0.0)
+                        }
+                    results.append(tag_info)
+                    print(f"Tag detected: ID={tag_info['id']}, Center=({tag_info['center'][0]:.1f}, {tag_info['center'][1]:.1f})")
+                except Exception as e:
+                    print(f"Error processing detection: {e}")
+                    continue
+            
+            return results
+            
+        except Exception as e:
+            print(f"AprilTag detection error: {e}")
+            return []
+    
+    def add_apriltag_visualization(self, image, detections):
+        for detection in detections:
+            try:
+                corners = np.array(detection['corners'], dtype=np.int32)
+                
+                cv2.polylines(image, [corners], True, (0, 255, 0), 2)
+                
+                center = np.array(detection['center'], dtype=np.int32)
+                cv2.circle(image, tuple(center), 5, (0, 0, 255), -1)
+                
+                cv2.putText(image, f"ID: {detection['id']}", 
+                           (center[0] - 20, center[1] - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            except Exception as e:
+                print(f"Error visualizing AprilTag: {e}")
+                continue
     
     def preprocess_image(self, image):
         return cv2.bilateralFilter(image, 9, 75, 75)
@@ -99,7 +203,7 @@ class ImageProcessor:
         cv2.drawContours(contour_img, white_contours, -1, (255, 255, 255), 2)
         return contour_img
     
-    def add_visualization_info(self, image, curve_detected, curve_direction, error, steering, red_light_detected=False):
+    def add_visualization_info(self, image, curve_detected, curve_direction, error, steering, red_light_detected=False, apriltag_count=0, is_stopping=False, stop_cooldown_remaining=None):
         cv2.putText(image, f"Curve: {curve_detected}, Dir: {curve_direction}", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cv2.putText(image, f"Error: {error:.2f}, Steer: {steering:.2f}", 
@@ -111,6 +215,16 @@ class ImageProcessor:
         else:
             cv2.putText(image, "No red light", (10, 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        cv2.putText(image, f"AprilTags: {apriltag_count}", (10, 120), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        
+        if is_stopping:
+            cv2.putText(image, "STOP SIGN - STOPPING", (10, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        elif stop_cooldown_remaining is not None and stop_cooldown_remaining > 0:
+            cv2.putText(image, f"Stop cooldown: {stop_cooldown_remaining:.1f}s", (10, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 128, 0), 2)
     
     def add_detection_points(self, image, yellow_points, white_points, y_positions):
         for i, y in enumerate(y_positions):
