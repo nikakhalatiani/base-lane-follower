@@ -1,41 +1,47 @@
 #!/usr/bin/env python3
- 
+"""
+Wheel control node for Duckietown robot.
+Receives motor commands and publishes them to the wheel driver.
+"""
+
 import os
 import rospy
 from duckietown.dtros import DTROS, NodeType
 from duckietown_msgs.msg import WheelsCmdStamped
-# from sensor_msgs.msg import Image
 from std_msgs.msg import Float64
-# from std_msgs.msg import Bool
 from cv_bridge import CvBridge
-# import numpy as np
-# import cv2
-
+from config import ROSConfig
 
 class WheelControlNode(DTROS):
-
     def __init__(self, node_name):
-        # initialize the DTROS parent class
+        # Initialize the DTROS parent class
         super(WheelControlNode, self).__init__(
             node_name=node_name, node_type=NodeType.GENERIC)
-        # static parameters
+        
+        # Setup ROS components
+        self._setup_ros_components()
+        
+        # Initialize motor velocities
+        self._vel_left = 0
+        self._vel_right = 0
+        
+        # Initialize CV bridge (legacy - could be removed if not needed)
+        self.bridge = CvBridge()
+
+    def _setup_ros_components(self):
+        # Get vehicle name from environment
         self.vehicle_name = os.environ['VEHICLE_NAME']
         wheels_topic = f"/{self.vehicle_name}/wheels_driver_node/wheels_cmd"
 
-        self._vel_left = 0
-        self._vel_right = 0
-
-        # construct publisher
+        # Setup publisher for wheel commands
         self._publisher = rospy.Publisher(
-            wheels_topic, WheelsCmdStamped, queue_size=1)
+            wheels_topic, WheelsCmdStamped, queue_size=ROSConfig.PUBLISHER_QUEUE_SIZE)
 
-    # Construct subscribers for throttle values
+        # Setup subscribers for motor commands
         self.left_motor = rospy.Subscriber(
             "left_motor", Float64, self.callback_left)
         self.right_motor = rospy.Subscriber(
             "right_motor", Float64, self.callback_right)
-
-        self.bridge = CvBridge()
 
     def callback_left(self, msg):
         self._vel_left = msg.data
@@ -44,13 +50,15 @@ class WheelControlNode(DTROS):
         self._vel_right = msg.data
 
     def run(self):
-        # publish 10 messages every second (10 Hz)
-        rate = rospy.Rate(10)
+        # Publish messages at control frequency
+        rate = rospy.Rate(ROSConfig.CONTROL_FREQUENCY)
+        
         while not rospy.is_shutdown():
-
+            # Create and publish wheel command message
             message = WheelsCmdStamped(
-                vel_left=self._vel_left, vel_right=self._vel_right)
-
+                vel_left=self._vel_left, 
+                vel_right=self._vel_right
+            )
             self._publisher.publish(message)
             rate.sleep()
 
@@ -60,10 +68,14 @@ class WheelControlNode(DTROS):
 
 
 if __name__ == '__main__':
-    # create the node
+    # Create and run the node
     node = WheelControlNode(node_name='wheel_control_node')
-    # run node
+    
+    # Register shutdown hook
     rospy.on_shutdown(node.on_shutdown)
+    
+    # Start the control loop
     node.run()
-    # keep the process from terminating
+    
+    # Keep the process from terminating
     rospy.spin()

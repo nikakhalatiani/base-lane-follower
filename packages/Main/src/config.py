@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+
+class DriveConfig:
+    BASE_SPEED = 0.15
+    CURVE_SPEED = 0.10
+    MAX_MOTOR_VALUE = 1.0
+    MIN_MOTOR_VALUE = -1.0
+    CURVE_BOOST_FACTOR = 1.3
+
+class ControlConfig:
+    P_GAIN = 0.4
+    D_GAIN = 0.2
+    MAX_STEER = 0.3
+    STEERING_THRESHOLD = 0.3
+
+class VisionConfig:
+    NEAR_FIELD_START = 0.6
+    FAR_FIELD_START = 0.4
+    FAR_FIELD_END = 0.6
+    ROI_START = 0.55
+    
+    YELLOW_LOWER_LUV = [10, 85, 160]
+    YELLOW_UPPER_LUV = [255, 255, 255]
+    WHITE_LOWER_HLS = [0, 144, 0]
+    WHITE_UPPER_HLS = [168, 255, 36]
+    
+    KERNEL_SIZE = (5, 5)
+    DILATE_ITERATIONS = 1
+    
+    CURVE_THRESHOLD = 20
+    MIN_LINE_PIXELS = 500
+    LINE_OFFSET = 160
+    
+    NUM_SLICES = 3
+    SLICE_TOLERANCE = 5
+
+class SmoothingConfig:
+    SMOOTHING_STRAIGHT = 3
+    SMOOTHING_CURVE = 2
+
+class RecoveryConfig:
+    RECOVERY_LEFT_SPEED = -0.2
+    RECOVERY_RIGHT_SPEED = -0.3
+
+class TrafficLightConfig:
+    DETECTION_REGION_TOP = 0.0
+    DETECTION_REGION_BOTTOM = 0.25
+    
+    RED_LOWER_1 = [0, 120, 120]
+    RED_UPPER_1 = [10, 255, 255]
+    RED_LOWER_2 = [170, 120, 120]
+    RED_UPPER_2 = [180, 255, 255]
+    
+    MIN_CONTOUR_AREA = 300
+    MAX_CONTOUR_AREA = 500
+    MIN_ASPECT_RATIO = 0.5
+    MAX_ASPECT_RATIO = 2.0
+    
+    MORPH_KERNEL_SIZE = (3, 3)
+    ERODE_ITERATIONS = 1
+    DILATE_ITERATIONS = 2
+    
+    DETECTION_THRESHOLD = 3
+    HISTORY_SIZE = 5
+
+class AprilTagConfig:
+    STOP_SIGN_ID = 20
+    MIN_TAG_SIZE = 160
+    STOP_DURATION = 3.0
+    STOP_COOLDOWN = 10.0  # Add this line
+
+class ROSConfig:
+    PUBLISHER_QUEUE_SIZE = 1
+    CONTROL_FREQUENCY = 10
