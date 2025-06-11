@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 class DriveConfig:
-    BASE_SPEED = 0.25
-    CURVE_SPEED = 0.20
+    BASE_SPEED = 0.15
+    CURVE_SPEED = 0.10
     MAX_MOTOR_VALUE = 1.0
     MIN_MOTOR_VALUE = -1.0
     CURVE_BOOST_FACTOR = 1.3
@@ -10,7 +10,7 @@ class DriveConfig:
 class ControlConfig:
     P_GAIN = 0.4
     D_GAIN = 0.2
-    MAX_STEER = 0.5
+    MAX_STEER = 0.3
     STEERING_THRESHOLD = 0.3
 
 class VisionConfig:

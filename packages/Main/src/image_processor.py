@@ -135,7 +135,23 @@ class ImageProcessor:
         mask_yellow[:roi_start, :] = 0
         mask_white[:roi_start, :] = 0
         
+        # Apply right-side white priority logic
+        mask_white = self.apply_white_priority_filter(mask_white)
+        
         return mask_yellow, mask_white
+    
+    def apply_white_priority_filter(self, mask_white):
+        """
+        Remove white lines entirely from the left side of the image.
+        Only process white lines on the right side.
+        """
+        h, w = mask_white.shape
+        center_x = w // 2
+        
+        # Zero out the entire left side
+        mask_white[:, :center_x] = 0
+        
+        return mask_white
     
     def detect_red_light(self, image):
         h, w = image.shape[:2]
