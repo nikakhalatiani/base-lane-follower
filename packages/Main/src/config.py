@@ -20,8 +20,8 @@ class VisionConfig:
     ROI_START = 0.55
     
     # Yellow lane detection - Enhanced HSV ranges
-    YELLOW_LOWER_HSV = [20, 100, 100]
-    YELLOW_UPPER_HSV = [30, 255, 255]
+    YELLOW_LOWER_HSV = [15, 80, 150]
+    YELLOW_UPPER_HSV = [35, 255, 255]
     YELLOW_BRIGHT_LOWER_HSV = [15, 80, 180]  # For bright yellow lines
     YELLOW_BRIGHT_UPPER_HSV = [35, 255, 255]
     
