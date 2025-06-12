@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 
 class DriveConfig:
-    BASE_SPEED = 0.15
-    CURVE_SPEED = 0.10
+    BASE_SPEED = 0.18
+    CURVE_SPEED = 0.13
     MAX_MOTOR_VALUE = 1.0
     MIN_MOTOR_VALUE = -1.0
     CURVE_BOOST_FACTOR = 1.3
 
 class ControlConfig:
-    P_GAIN = 0.4
-    D_GAIN = 0.2
-    MAX_STEER = 0.3
+    P_GAIN = 0.65
+    D_GAIN = 0.35
+    MAX_STEER = 0.4
     STEERING_THRESHOLD = 0.3
 
 class VisionConfig:
@@ -19,15 +19,20 @@ class VisionConfig:
     FAR_FIELD_END = 0.6
     ROI_START = 0.55
     
-    YELLOW_LOWER_LUV = [10, 85, 160]
-    YELLOW_UPPER_LUV = [255, 255, 255]
-    WHITE_LOWER_HLS = [0, 144, 0]
-    WHITE_UPPER_HLS = [168, 255, 36]
+    # Yellow lane detection - Enhanced HSV ranges
+    YELLOW_LOWER_HSV = [20, 100, 100]
+    YELLOW_UPPER_HSV = [30, 255, 255]
+    YELLOW_BRIGHT_LOWER_HSV = [15, 80, 180]  # For bright yellow lines
+    YELLOW_BRIGHT_UPPER_HSV = [35, 255, 255]
+    
+    # White lane detection - HLS
+    WHITE_LOWER_HLS = [21, 0, 163]
+    WHITE_UPPER_HLS = [161, 58, 203]
     
     KERNEL_SIZE = (5, 5)
     DILATE_ITERATIONS = 1
     
-    CURVE_THRESHOLD = 20
+    CURVE_THRESHOLD = 15
     MIN_LINE_PIXELS = 500
     LINE_OFFSET = 160
     
@@ -51,8 +56,8 @@ class TrafficLightConfig:
     RED_LOWER_2 = [170, 120, 120]
     RED_UPPER_2 = [180, 255, 255]
     
-    MIN_CONTOUR_AREA = 300
-    MAX_CONTOUR_AREA = 500
+    MIN_CONTOUR_AREA = 400
+    MAX_CONTOUR_AREA = 600
     MIN_ASPECT_RATIO = 0.5
     MAX_ASPECT_RATIO = 2.0
     

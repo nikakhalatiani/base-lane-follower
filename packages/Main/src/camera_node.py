@@ -11,15 +11,9 @@ from cv_bridge import CvBridge
 from std_msgs.msg import Float64
 from collections import deque
 from image_processor import ImageProcessor
+from lane_detector import LaneDetector
+from pid_controller import PDController
 from config import AprilTagConfig
-
-BASE_SPEED = 0.25
-CURVE_SPEED = 0.20
-P_GAIN = 0.4
-D_GAIN = 0.2
-MAX_STEER = 0.5
-SMOOTHING_STRAIGHT = 3
-SMOOTHING_CURVE = 2
 
 class CameraReaderNode(DTROS):
 
@@ -27,17 +21,13 @@ class CameraReaderNode(DTROS):
         super(CameraReaderNode, self).__init__(
             node_name=node_name, node_type=NodeType.VISUALIZATION)
 
-        self.base_speed = BASE_SPEED
-        self.curve_speed = CURVE_SPEED
-        self.p_gain = P_GAIN
-        self.d_gain = D_GAIN
-        self.max_steer = MAX_STEER
-        
-        self.prev_error = 0
-        self.left_motor_history = deque(maxlen=SMOOTHING_STRAIGHT)
-        self.right_motor_history = deque(maxlen=SMOOTHING_STRAIGHT)
-        
+        # Initialize processors
         self.image_processor = ImageProcessor()
+        self.lane_detector = LaneDetector()
+        self.pid_controller = PDController()
+        
+        # Track previous error for lane detection
+        self.prev_error = 0
         
         self.stop_sign_detected = False
         self.stop_start_time = None
@@ -60,37 +50,53 @@ class CameraReaderNode(DTROS):
         self.right_motor = rospy.Publisher("right_motor", Float64, queue_size=1)
 
         self.shutting_down = False
-        # Create trackbars for white color adjustment
-        cv2.createTrackbar('Lower Hue', self._window, 21, 180, lambda x: None)
-        cv2.createTrackbar('Upper Hue', self._window, 180, 180, lambda x: None)
-        cv2.createTrackbar('Lower Saturation', self._window, 0, 255, lambda x: None)
-        cv2.createTrackbar('Upper Saturation', self._window, 67, 255, lambda x: None)
-        cv2.createTrackbar('Lower Value', self._window, 164, 255, lambda x: None)
-        cv2.createTrackbar('Upper Value', self._window, 232, 255, lambda x: None)
+        self.vehicle_running = False  # Start/stop state
+        self.color_picker_active = False
+        
+        # Create compact trackbars for color adjustment
+        # Yellow HSV - Compact layout
+        cv2.createTrackbar('Y_H', self._window, 22, 40, lambda x: None)
+        cv2.createTrackbar('Y_S', self._window, 72, 255, lambda x: None)
+        cv2.createTrackbar('Y_V', self._window, 119, 255, lambda x: None)
+        cv2.createTrackbar('Y_R', self._window, 5, 20, lambda x: None)
+        
+        # White HLS - Compact layout  
+        cv2.createTrackbar('W_H', self._window, 47, 180, lambda x: None)
+        cv2.createTrackbar('W_L', self._window, 115, 255, lambda x: None)
+        cv2.createTrackbar('W_S', self._window, 128, 255, lambda x: None)
+        cv2.createTrackbar('W_R', self._window, 123, 180, lambda x: None)
+        
+        # Control sliders
+        cv2.createTrackbar('Speed', self._window, 18, 50, lambda x: None)  # Speed in cm/s * 100 (max 0.50)
+        cv2.createTrackbar('Start', self._window, 0, 1, self.toggle_start_stop)
 
         rospy.on_shutdown(self.shutdown_hook)
 
+    def toggle_start_stop(self, value):
+        """Toggle vehicle start/stop state"""
+        self.vehicle_running = bool(value)
+        if not self.vehicle_running:
+            # Stop immediately when toggled off
+            self.left_motor.publish(0)
+            self.right_motor.publish(0)
+    
     def shutdown_hook(self):
         self.shutting_down = True
         self.left_motor.publish(0)
         self.right_motor.publish(0)
         cv2.destroyAllWindows()
-        
-    def smooth_motor_value(self, value, history_buffer):
-        history_buffer.append(value)
-        return sum(history_buffer) / len(history_buffer)
 
     def callback(self, msg):
         if self.shutting_down:
             return
 
         self.image = self.bridge.compressed_imgmsg_to_cv2(msg)
-        self.image = cv2.bilateralFilter(self.image, 9, 75, 75)
-
         vis_image = self.image.copy()
         
+        # Red light detection
         red_light_detected = self.image_processor.detect_red_light(self.image)
         
+        # AprilTag detection and stop sign handling
         try:
             apriltag_detections = self.image_processor.detect_apriltags(self.image)
             self.image_processor.add_apriltag_visualization(vis_image, apriltag_detections)
@@ -128,155 +134,88 @@ class CameraReaderNode(DTROS):
             print(f"AprilTag processing error: {e}")
             apriltag_detections = []
         
-        h, w = self.image.shape[:2]
-        near_field = self.image[int(h*0.6):, :]
-        far_field = self.image[int(h*0.4):int(h*0.6), :]
+        # Read compact slider values
+        y_h = cv2.getTrackbarPos('Y_H', self._window)
+        y_s = cv2.getTrackbarPos('Y_S', self._window)
+        y_v = cv2.getTrackbarPos('Y_V', self._window)
+        y_range = cv2.getTrackbarPos('Y_R', self._window)
         
-        luv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
-        hls = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
-
-        lb_yellow = np.array([15, 80, 150])
-        ub_yellow = np.array([35, 255, 255])
-        mask_yellow = cv2.inRange(luv, lb_yellow, ub_yellow)
-        mask_yellow[:int(h*0.55), :] = 0
+        w_h = cv2.getTrackbarPos('W_H', self._window)
+        w_l = cv2.getTrackbarPos('W_L', self._window)
+        w_s = cv2.getTrackbarPos('W_S', self._window)
+        w_range = cv2.getTrackbarPos('W_R', self._window)
         
+        # Read control values
+        speed_setting = cv2.getTrackbarPos('Speed', self._window) / 100.0  # Convert back to 0.00-0.30
         
-        lower_hue = cv2.getTrackbarPos('Lower Hue', self._window)
-        upper_hue = cv2.getTrackbarPos('Upper Hue', self._window)
-        lower_saturation = cv2.getTrackbarPos('Lower Saturation', self._window)
-        upper_saturation = cv2.getTrackbarPos('Upper Saturation', self._window)
-        lower_value = cv2.getTrackbarPos('Lower Value', self._window)
-        upper_value = cv2.getTrackbarPos('Upper Value', self._window)
-
-
-        lb_white = np.array([lower_hue, lower_saturation, lower_value])
-        ub_white = np.array([upper_hue, upper_saturation, upper_value])
-        mask_white = cv2.inRange(hls, lb_white, ub_white)
-        mask_white[:int(h*0.55), :] = 0
+        slider_values = {
+            'yellow_hsv': [[max(0, y_h - y_range), y_s, y_v], [min(179, y_h + y_range), 255, 255]],
+            'white_hls': [[max(0, w_h - w_range), w_l, 0], [min(179, w_h + w_range), 255, w_s]]
+        }
         
-        kernel = np.ones((5, 5), np.uint8)
-        mask_yellow = cv2.dilate(mask_yellow, kernel, iterations=1)
-        mask_white = cv2.dilate(mask_white, kernel, iterations=1)
+        # Use the new lane detection pipeline with slider values
+        detection_results = self.lane_detector.process_frame(self.image, self.prev_error, slider_values)
+        self.prev_error = detection_results['error']
         
-        yellow_contours, _ = cv2.findContours(mask_yellow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        white_contours, _ = cv2.findContours(mask_white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Use the new PID controller with speed setting
+        left_motor, right_motor, steering, debug_info = self.pid_controller.process_control_loop(detection_results, speed_setting)
         
-        contour_img = np.zeros_like(self.image)
-        cv2.drawContours(contour_img, yellow_contours, -1, (0, 255, 255), 2)
-        cv2.drawContours(contour_img, white_contours, -1, (255, 255, 255), 2)
-        
-        left_line_detected = len(yellow_contours) > 0
-        right_line_detected = len(white_contours) > 0
-        
-        num_slices = 3
-        slice_height = int(h * 0.35 / num_slices)
-        start_y = int(h * 0.55)
-        
-        yellow_x_points = []
-        white_x_points = []
-        y_points = []
-        
-        for i in range(num_slices):
-            y = start_y + i * slice_height + slice_height // 2
-            y_points.append(y)
-            
-            slice_yellow = mask_yellow[y-5:y+5, :]
-            yellow_indices = np.where(slice_yellow > 0)[1]
-            if len(yellow_indices) > 0:
-                yellow_x = int(np.mean(yellow_indices))
-                yellow_x_points.append(yellow_x)
-                cv2.circle(vis_image, (yellow_x, y), 5, (0, 255, 255), -1)
-            
-            slice_white = mask_white[y-5:y+5, :]
-            white_indices = np.where(slice_white > 0)[1]
-            if len(white_indices) > 0:
-                white_x = int(np.mean(white_indices))
-                white_x_points.append(white_x)
-                cv2.circle(vis_image, (white_x, y), 5, (255, 255, 255), -1)
-                
-        is_curve = False
-        curve_direction = 0
-        
-        if len(yellow_x_points) >= 2:
-            yellow_diff = yellow_x_points[-1] - yellow_x_points[0]
-            if abs(yellow_diff) > 20:
-                is_curve = True
-                curve_direction += np.sign(yellow_diff)
-                
-        if len(white_x_points) >= 2:
-            white_diff = white_x_points[-1] - white_x_points[0]
-            if abs(white_diff) > 20:
-                is_curve = True
-                curve_direction += np.sign(white_diff)
-        
-        if left_line_detected and right_line_detected and len(yellow_x_points) > 0 and len(white_x_points) > 0:
-            center_position = (yellow_x_points[-1] + white_x_points[-1]) / 2
-            ideal_center = w / 2
-            error = ideal_center - center_position
-        elif left_line_detected and len(yellow_x_points) > 0:
-            error = w/2 - (yellow_x_points[-1] + 160)
-        elif right_line_detected and len(white_x_points) > 0:
-            error = w/2 - (white_x_points[-1] - 160)
-        else:
-            error = self.prev_error
-        
-        error = np.clip(error / (w/2), -1, 1)
-        
-        error_diff = error - self.prev_error
-        self.prev_error = error
-        
-        steering = self.p_gain * error + self.d_gain * error_diff
-        steering = np.clip(steering, -self.max_steer, self.max_steer)
-        
-        current_speed = self.curve_speed if is_curve else self.base_speed
-        
-        left_motor = current_speed - steering
-        right_motor = current_speed + steering
-        
-        if is_curve and abs(steering) > 0.3:
-            if steering > 0:
-                right_motor *= 1.3
-            else:
-                left_motor *= 1.3
-        
-        line_pixels = np.count_nonzero(mask_yellow) + np.count_nonzero(mask_white)
-        if line_pixels < 500:
-            left_motor = -0.2
-            right_motor = -0.3
-            
-        smoothing_amount = SMOOTHING_CURVE if is_curve else SMOOTHING_STRAIGHT
-        self.left_motor_history = deque(self.left_motor_history, maxlen=smoothing_amount)
-        self.right_motor_history = deque(self.right_motor_history, maxlen=smoothing_amount)
-        
-        left_motor = self.smooth_motor_value(left_motor, self.left_motor_history)
-        right_motor = self.smooth_motor_value(right_motor, self.right_motor_history)
-        
-        left_motor = np.clip(left_motor, -1.0, 1.0)
-        right_motor = np.clip(right_motor, -1.0, 1.0)
-        
-        if self.is_stopping:
+        # Override for special conditions
+        if not self.vehicle_running:
+            left_motor = 0.0
+            right_motor = 0.0
+        elif self.is_stopping:
             left_motor = 0.0
             right_motor = 0.0
         elif red_light_detected:
             left_motor = 0.0
             right_motor = 0.0
         
+        # Publish motor commands
         if not self.shutting_down:
             self.left_motor.publish(left_motor)
             self.right_motor.publish(right_motor)
 
+        # Calculate stop cooldown for display
         stop_cooldown_remaining = None
         if self.last_stop_time is not None:
             time_since_last_stop = time.time() - self.last_stop_time
             if time_since_last_stop < AprilTagConfig.STOP_COOLDOWN:
                 stop_cooldown_remaining = AprilTagConfig.STOP_COOLDOWN - time_since_last_stop
         
-        self.image_processor.add_visualization_info(vis_image, is_curve, curve_direction, 
-                                                   error, steering, red_light_detected, 
-                                                   len(apriltag_detections) if apriltag_detections else 0,
-                                                   self.is_stopping, stop_cooldown_remaining)
+        # Add comprehensive debugging visualization
+        self.image_processor.add_visualization_info(
+            vis_image, 
+            detection_results['is_curve'], 
+            detection_results['curve_direction'],
+            detection_results['error'], 
+            steering, 
+            red_light_detected, 
+            len(apriltag_detections) if apriltag_detections else 0,
+            self.is_stopping, 
+            stop_cooldown_remaining,
+            detection_results,  # Pass detection results for debugging
+            debug_info          # Pass motor debug info
+        )
         
-        cv2.imshow(self._window, contour_img)
+        # Add detection points to visualization
+        self.image_processor.add_detection_points(
+            vis_image, 
+            detection_results['yellow_points'], 
+            detection_results['white_points'], 
+            detection_results['y_points']
+        )
+        
+        # Create contour visualization
+        contour_img = self.image_processor.create_contour_visualization(
+            self.image.shape, 
+            detection_results['yellow_contours'], 
+            detection_results['white_contours']
+        )
+        
+        # Display both images
+        cv2.imshow(self._window, vis_image)  # Show main image with debug info
+        cv2.imshow("Contours", contour_img)  # Show contour detection
         cv2.waitKey(1)
 
 

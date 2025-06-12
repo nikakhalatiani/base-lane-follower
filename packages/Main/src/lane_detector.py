@@ -56,13 +56,15 @@ class LaneDetector:
                 
         return yellow_x_points, white_x_points, y_points
     
-    def detect_curve(self, yellow_x_points, white_x_points):
+    def detect_curve(self, yellow_x_points, white_x_points, yellow_pixels, white_pixels):
         """
-        Detect if the vehicle is in a curve based on line positions
+        Detect if the vehicle is in a curve based on line positions and pixel ratios
         
         Args:
             yellow_x_points: List of yellow line x-coordinates
             white_x_points: List of white line x-coordinates
+            yellow_pixels: Number of yellow pixels detected
+            white_pixels: Number of white pixels detected
             
         Returns:
             tuple: (is_curve, curve_direction)
@@ -70,15 +72,25 @@ class LaneDetector:
         is_curve = False
         curve_direction = 0
         
+        # Enhanced curve detection based on pixel ratio
+        if yellow_pixels > 0 and white_pixels > 0:
+            pixel_ratio = yellow_pixels / white_pixels
+            # If yellow pixels are about 40-60% of white, likely entering/in yellow curve
+            if 0.4 <= pixel_ratio <= 0.6:
+                is_curve = True
+                # Yellow curve bias - turn more aggressively toward yellow side
+                curve_direction = -1  # Turn left toward yellow line
+        
+        # Original position-based curve detection (enhanced thresholds)
         if len(yellow_x_points) >= 2:
             yellow_diff = yellow_x_points[-1] - yellow_x_points[0]
-            if abs(yellow_diff) > VisionConfig.CURVE_THRESHOLD:
+            if abs(yellow_diff) > VisionConfig.CURVE_THRESHOLD * 0.7:  # More sensitive
                 is_curve = True
                 curve_direction += np.sign(yellow_diff)
                 
         if len(white_x_points) >= 2:
             white_diff = white_x_points[-1] - white_x_points[0]
-            if abs(white_diff) > VisionConfig.CURVE_THRESHOLD:
+            if abs(white_diff) > VisionConfig.CURVE_THRESHOLD * 0.7:  # More sensitive
                 is_curve = True
                 curve_direction += np.sign(white_diff)
         
@@ -136,13 +148,14 @@ class LaneDetector:
         line_pixels = np.count_nonzero(mask_yellow) + np.count_nonzero(mask_white)
         return line_pixels >= VisionConfig.MIN_LINE_PIXELS
     
-    def process_frame(self, image, prev_error):
+    def process_frame(self, image, prev_error, slider_values=None):
         """
         Complete lane detection pipeline for a single frame
         
         Args:
             image: Input BGR image
             prev_error: Previous tracking error
+            slider_values: Optional slider values for white line detection
             
         Returns:
             dict: Detection results containing error, curve info, and visualization data
@@ -152,7 +165,7 @@ class LaneDetector:
         h, w = image.shape[:2]
         
         # Create color masks
-        mask_yellow, mask_white = self.image_processor.create_color_masks(processed_image)
+        mask_yellow, mask_white = self.image_processor.create_color_masks(processed_image, slider_values)
         
         # Clean masks
         mask_yellow, mask_white = self.image_processor.clean_masks(mask_yellow, mask_white)
@@ -169,8 +182,12 @@ class LaneDetector:
         yellow_x_points, white_x_points, y_points = self.detect_lines_in_slices(
             mask_yellow, mask_white, h)
         
-        # Detect curves
-        is_curve, curve_direction = self.detect_curve(yellow_x_points, white_x_points)
+        # Add pixel counts for curve detection
+        yellow_pixels = np.count_nonzero(mask_yellow)
+        white_pixels = np.count_nonzero(mask_white)
+        
+        # Detect curves with enhanced pixel ratio detection
+        is_curve, curve_direction = self.detect_curve(yellow_x_points, white_x_points, yellow_pixels, white_pixels)
         
         # Calculate tracking error
         error = self.calculate_tracking_error(
@@ -191,5 +208,7 @@ class LaneDetector:
             'white_points': white_x_points,
             'y_points': y_points,
             'yellow_contours': yellow_contours,
-            'white_contours': white_contours
+            'white_contours': white_contours,
+            'yellow_pixels': yellow_pixels,
+            'white_pixels': white_pixels
         }

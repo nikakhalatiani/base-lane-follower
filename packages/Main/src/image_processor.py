@@ -9,6 +9,7 @@ class ImageProcessor:
     def __init__(self):
         self.kernel = np.ones(VisionConfig.KERNEL_SIZE, np.uint8)
         self.red_light_history = []
+        self.red_detection_info = {}
         try:
             from pupil_apriltags import Detector
             self.apriltag_detector = Detector(
@@ -117,18 +118,29 @@ class ImageProcessor:
     def preprocess_image(self, image):
         return cv2.bilateralFilter(image, 9, 75, 75)
     
-    def create_color_masks(self, image):
+    def create_color_masks(self, image, slider_values=None):
         h, w = image.shape[:2]
         
-        luv = cv2.cvtColor(image, cv2.COLOR_BGR2LUV)
+        # Use HSV for yellow and HLS for white
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
         
-        lb_yellow = np.array(VisionConfig.YELLOW_LOWER_LUV)
-        ub_yellow = np.array(VisionConfig.YELLOW_UPPER_LUV)
-        mask_yellow = cv2.inRange(luv, lb_yellow, ub_yellow)
+        # Yellow detection - use sliders if provided, otherwise config
+        if slider_values and 'yellow_hsv' in slider_values:
+            lb_yellow = np.array(slider_values['yellow_hsv'][0])
+            ub_yellow = np.array(slider_values['yellow_hsv'][1])
+        else:
+            lb_yellow = np.array(VisionConfig.YELLOW_LOWER_HSV)
+            ub_yellow = np.array(VisionConfig.YELLOW_UPPER_HSV)
+        mask_yellow = cv2.inRange(hsv, lb_yellow, ub_yellow)
         
-        lb_white = np.array(VisionConfig.WHITE_LOWER_HLS)
-        ub_white = np.array(VisionConfig.WHITE_UPPER_HLS)
+        # White detection - use sliders if provided, otherwise config
+        if slider_values and 'white_hls' in slider_values:
+            lb_white = np.array(slider_values['white_hls'][0])
+            ub_white = np.array(slider_values['white_hls'][1])
+        else:
+            lb_white = np.array(VisionConfig.WHITE_LOWER_HLS)
+            ub_white = np.array(VisionConfig.WHITE_UPPER_HLS)
         mask_white = cv2.inRange(hls, lb_white, ub_white)
         
         roi_start = int(h * VisionConfig.ROI_START)
@@ -171,13 +183,22 @@ class ImageProcessor:
         mask2 = cv2.inRange(hsv, red_lower_2, red_upper_2)
         red_mask = cv2.bitwise_or(mask1, mask2)
         
+        # Count raw red pixels before morphology
+        raw_red_pixels = np.count_nonzero(red_mask)
+        
         kernel = np.ones(TrafficLightConfig.MORPH_KERNEL_SIZE, np.uint8)
         red_mask = cv2.erode(red_mask, kernel, iterations=TrafficLightConfig.ERODE_ITERATIONS)
         red_mask = cv2.dilate(red_mask, kernel, iterations=TrafficLightConfig.DILATE_ITERATIONS)
         
+        # Count processed red pixels
+        processed_red_pixels = np.count_nonzero(red_mask)
+        
         contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         valid_detections = 0
+        total_contours = len(contours)
+        valid_contour_areas = []
+        
         for contour in contours:
             area = cv2.contourArea(contour)
             if TrafficLightConfig.MIN_CONTOUR_AREA <= area <= TrafficLightConfig.MAX_CONTOUR_AREA:
@@ -187,6 +208,7 @@ class ImageProcessor:
                     if (TrafficLightConfig.MIN_ASPECT_RATIO <= aspect_ratio <= 
                         TrafficLightConfig.MAX_ASPECT_RATIO):
                         valid_detections += 1
+                        valid_contour_areas.append(area)
         
         detected = valid_detections > 0
         self.red_light_history.append(detected)
@@ -195,7 +217,23 @@ class ImageProcessor:
             self.red_light_history.pop(0)
         
         recent_detections = sum(self.red_light_history)
-        return recent_detections >= TrafficLightConfig.DETECTION_THRESHOLD
+        final_detected = recent_detections >= TrafficLightConfig.DETECTION_THRESHOLD
+        
+        # Store detection info for visualization
+        self.red_detection_info = {
+            'raw_pixels': raw_red_pixels,
+            'processed_pixels': processed_red_pixels,
+            'total_contours': total_contours,
+            'valid_detections': valid_detections,
+            'valid_areas': valid_contour_areas,
+            'history_score': recent_detections,
+            'threshold': TrafficLightConfig.DETECTION_THRESHOLD,
+            'final_detected': final_detected,
+            'roi_top': roi_top,
+            'roi_bottom': roi_bottom
+        }
+        
+        return final_detected
     
     def clean_masks(self, mask_yellow, mask_white):
         mask_yellow = cv2.dilate(mask_yellow, self.kernel, 
@@ -219,27 +257,68 @@ class ImageProcessor:
         cv2.drawContours(contour_img, white_contours, -1, (255, 255, 255), 2)
         return contour_img
     
-    def add_visualization_info(self, image, curve_detected, curve_direction, error, steering, red_light_detected=False, apriltag_count=0, is_stopping=False, stop_cooldown_remaining=None):
+    def add_visualization_info(self, image, curve_detected, curve_direction, error, steering, red_light_detected=False, apriltag_count=0, is_stopping=False, stop_cooldown_remaining=None, detection_results=None, motor_debug=None):
         cv2.putText(image, f"Curve: {curve_detected}, Dir: {curve_direction}", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cv2.putText(image, f"Error: {error:.2f}, Steer: {steering:.2f}", 
                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
-        if red_light_detected:
-            cv2.putText(image, "RED LIGHT DETECTED!", (10, 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        else:
-            cv2.putText(image, "No red light", (10, 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # Add detection debugging
+        if detection_results:
+            left_det = "Y" if detection_results.get('left_detected') else "N"
+            right_det = "Y" if detection_results.get('right_detected') else "N"
+            yellow_only = detection_results.get('left_detected') and not detection_results.get('right_detected')
+            cv2.putText(image, f"L:{left_det} R:{right_det} YellowOnly:{yellow_only}", 
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+            
+            # Show pixel counts
+            yellow_pixels = detection_results.get('yellow_pixels', 0)
+            white_pixels = detection_results.get('white_pixels', 0)
+            cv2.putText(image, f"Y_pix:{yellow_pixels} W_pix:{white_pixels}", 
+                       (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
         
-        cv2.putText(image, f"AprilTags: {apriltag_count}", (10, 120), 
+        # Add motor debugging
+        if motor_debug:
+            cv2.putText(image, f"L_motor:{motor_debug['left']:.2f} R_motor:{motor_debug['right']:.2f}", 
+                       (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+            cv2.putText(image, f"Speed:{motor_debug['speed']:.2f} YellowMode:{motor_debug['yellow_mode']}", 
+                       (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+        
+        # Red light detection details
+        if hasattr(self, 'red_detection_info') and self.red_detection_info:
+            info = self.red_detection_info
+            # Main status
+            status_color = (0, 0, 255) if red_light_detected else (0, 255, 0)
+            status_text = "RED DETECTED!" if red_light_detected else "No Red"
+            cv2.putText(image, f"Red: {status_text}", (10, 210), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 2)
+            
+            # Pixel counts
+            cv2.putText(image, f"Raw:{info['raw_pixels']} Proc:{info['processed_pixels']}", 
+                       (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 100, 100), 1)
+            
+            # Contour analysis
+            cv2.putText(image, f"Cont:{info['total_contours']} Valid:{info['valid_detections']}", 
+                       (10, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 100, 100), 1)
+            
+            # History score
+            cv2.putText(image, f"Score:{info['history_score']}/{info['threshold']}", 
+                       (10, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 100, 100), 1)
+            
+            # ROI indicator
+            h, w = image.shape[:2]
+            roi_top = info['roi_top']
+            roi_bottom = info['roi_bottom']
+            cv2.rectangle(image, (0, roi_top), (w, roi_bottom), (0, 255, 255), 2)
+        
+        cv2.putText(image, f"AprilTags: {apriltag_count}", (10, 300), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
         
         if is_stopping:
-            cv2.putText(image, "STOP SIGN - STOPPING", (10, 150), 
+            cv2.putText(image, "STOP SIGN - STOPPING", (10, 330), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         elif stop_cooldown_remaining is not None and stop_cooldown_remaining > 0:
-            cv2.putText(image, f"Stop cooldown: {stop_cooldown_remaining:.1f}s", (10, 150), 
+            cv2.putText(image, f"Stop cooldown: {stop_cooldown_remaining:.1f}s", (10, 330), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 128, 0), 2)
     
     def add_detection_points(self, image, yellow_points, white_points, y_positions):
